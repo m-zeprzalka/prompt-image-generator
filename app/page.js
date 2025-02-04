@@ -14,27 +14,54 @@ export default function Home() {
   useEffect(() => {
     let timer;
     if (loading) {
-      setGenerationTime(0);
       timer = setInterval(() => {
         setGenerationTime((prev) => prev + 1);
       }, 1000);
-    } else if (timer) {
-      clearInterval(timer);
     }
     return () => {
       if (timer) clearInterval(timer);
     };
   }, [loading]);
 
-  const handleDownload = () => {
-    if (imageBlob) {
-      const link = document.createElement("a");
-      link.href = URL.createObjectURL(imageBlob);
-      link.download = `generated-image-${Date.now()}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(link.href);
+  const startGeneration = async () => {
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+
+      const contentType = response.headers.get("content-type");
+
+      if (contentType?.includes("application/json")) {
+        const errorData = await response.json();
+        // Jeśli model się ładuje, spróbujemy ponownie za 50 sekund
+        if (response.status === 503) {
+          setTimeout(startGeneration, 50000);
+          return;
+        }
+        throw new Error(errorData.error || "Failed to generate image");
+      }
+
+      if (!response.ok) {
+        throw new Error("Failed to generate image");
+      }
+
+      const blob = await response.blob();
+      if (blob.size > 0) {
+        setImageBlob(blob);
+        setImageUrl(URL.createObjectURL(blob));
+        setTotalGenerationTime(generationTime);
+        setLoading(false);
+      } else {
+        // Jeśli otrzymaliśmy pusty blob, spróbujemy ponownie
+        setTimeout(startGeneration, 50000);
+      }
+    } catch (error) {
+      if (loading) {
+        // Jeśli wciąż jesteśmy w trybie ładowania, spróbujemy ponownie
+        setTimeout(startGeneration, 50000);
+      }
     }
   };
 
@@ -49,28 +76,20 @@ export default function Home() {
     setImageUrl(null);
     setImageBlob(null);
     setTotalGenerationTime(null);
-    const startTime = Date.now();
+    setGenerationTime(0);
 
-    try {
-      const response = await fetch("/api/generate", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ prompt }),
-      });
+    startGeneration();
+  };
 
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.error || "Failed to generate image.");
-      }
-
-      const blob = await response.blob();
-      setImageBlob(blob);
-      setImageUrl(URL.createObjectURL(blob));
-      setTotalGenerationTime(Math.floor((Date.now() - startTime) / 1000));
-    } catch (error) {
-      setErrorMessage(error.message || "An unexpected error occurred.");
-    } finally {
-      setLoading(false);
+  const handleDownload = () => {
+    if (imageBlob) {
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(imageBlob);
+      link.download = `generated-image-${Date.now()}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href);
     }
   };
 
