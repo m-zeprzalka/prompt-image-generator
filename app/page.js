@@ -1,95 +1,176 @@
-import Image from "next/image";
-import styles from "./page.module.css";
+"use client";
+
+import { useState, useEffect } from "react";
 
 export default function Home() {
-  return (
-    <div className={styles.page}>
-      <main className={styles.main}>
-        <Image
-          className={styles.logo}
-          src="/next.svg"
-          alt="Next.js logo"
-          width={180}
-          height={38}
-          priority
-        />
-        <ol>
-          <li>
-            Get started by editing <code>app/page.js</code>.
-          </li>
-          <li>Save and see your changes instantly.</li>
-        </ol>
+  // Podstawowe stany aplikacji
+  const [prompt, setPrompt] = useState("");
+  const [imageUrl, setImageUrl] = useState(null);
+  const [imageBlob, setImageBlob] = useState(null); // Nowy stan dla przechowywania blob'a
+  const [loading, setLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [generationTime, setGenerationTime] = useState(0);
+  const [totalGenerationTime, setTotalGenerationTime] = useState(null);
 
-        <div className={styles.ctas}>
+  // Efekt licznika czasu
+  useEffect(() => {
+    let timer;
+    if (loading) {
+      setGenerationTime(0);
+      timer = setInterval(() => {
+        setGenerationTime((prev) => prev + 1);
+      }, 1000);
+    } else if (timer) {
+      clearInterval(timer);
+    }
+    return () => {
+      if (timer) clearInterval(timer);
+    };
+  }, [loading]);
+
+  // Funkcja do pobierania obrazu
+  const handleDownload = () => {
+    if (imageBlob) {
+      // Tworzymy tymczasowy link do pobrania
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(imageBlob);
+      link.download = `generated-image-${Date.now()}.png`; // Unikalna nazwa pliku
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(link.href); // Czyszczenie URL
+    }
+  };
+
+  // Główna funkcja generowania obrazu
+  const handleGenerateImage = async () => {
+    if (!prompt.trim()) {
+      setErrorMessage("Please enter a valid prompt.");
+      return;
+    }
+
+    // Reset stanów
+    setLoading(true);
+    setErrorMessage("");
+    setImageUrl(null);
+    setImageBlob(null);
+    setTotalGenerationTime(null);
+    const startTime = Date.now();
+
+    try {
+      const response = await fetch("/api/generate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ prompt }),
+      });
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.error || "Failed to generate image.");
+      }
+
+      const blob = await response.blob();
+      // Zapisujemy blob do pobrania
+      setImageBlob(blob);
+      // Tworzymy URL dla wyświetlenia
+      setImageUrl(URL.createObjectURL(blob));
+      setTotalGenerationTime(Math.floor((Date.now() - startTime) / 1000));
+    } catch (error) {
+      setErrorMessage(error.message || "An unexpected error occurred.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <main>
+      <div className="container">
+        <h1>Prompt Image Generator</h1>
+        <p>
+          A simple image generator from prompts based on the{" "}
           <a
-            className={styles.primary}
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
+            href="https://huggingface.co/black-forest-labs/FLUX.1-dev"
             target="_blank"
             rel="noopener noreferrer"
           >
-            <Image
-              className={styles.logo}
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={20}
-              height={20}
+            FLUX.1-dev
+          </a>{" "}
+          library, built with{" "}
+          <a
+            href="https://nextjs.org"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Next.js
+          </a>{" "}
+          by{" "}
+          <a
+            href="https://vercel.com"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Vercel
+          </a>
+        </p>
+
+        {errorMessage && <p className="error-message">{errorMessage}</p>}
+
+        {/* Status generowania z licznikiem czasu */}
+        {loading && (
+          <p className="status-message pulse">
+            Generating image... ({generationTime}s)
+          </p>
+        )}
+
+        {/* Informacja o czasie wygenerowania */}
+        {!loading && totalGenerationTime !== null && (
+          <p className="success-message">
+            Image generated in {totalGenerationTime} seconds!
+          </p>
+        )}
+
+        {/* Wygenerowany obraz i przycisk pobierania */}
+        {imageUrl && (
+          <div className="image-container">
+            <img
+              src={imageUrl}
+              alt="Generated result"
+              className="generated-image"
             />
-            Deploy now
-          </a>
+            <button onClick={handleDownload} className="download-button">
+              Download Image
+            </button>
+          </div>
+        )}
+
+        <textarea
+          placeholder="Enter your prompt here..."
+          value={prompt}
+          onChange={(e) => setPrompt(e.target.value)}
+          className="prompt-input"
+          disabled={loading}
+        />
+
+        {/* Przycisk generowania bez licznika */}
+        <button
+          onClick={handleGenerateImage}
+          disabled={loading}
+          className="generate-button"
+        >
+          {loading ? "Generating..." : "Generate Image"}
+        </button>
+      </div>
+      <div className="bar">
+        <p className="author">
           <a
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
+            href="https://zeprzalka.pl"
             target="_blank"
             rel="noopener noreferrer"
-            className={styles.secondary}
           >
-            Read our docs
+            Michał Zeprzałka - 2025
           </a>
-        </div>
-      </main>
-      <footer className={styles.footer}>
-        <a
-          href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/file.svg"
-            alt="File icon"
-            width={16}
-            height={16}
-          />
-          Learn
-        </a>
-        <a
-          href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/window.svg"
-            alt="Window icon"
-            width={16}
-            height={16}
-          />
-          Examples
-        </a>
-        <a
-          href="https://nextjs.org?utm_source=create-next-app&utm_medium=appdir-template&utm_campaign=create-next-app"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          <Image
-            aria-hidden
-            src="/globe.svg"
-            alt="Globe icon"
-            width={16}
-            height={16}
-          />
-          Go to nextjs.org →
-        </a>
-      </footer>
-    </div>
+        </p>
+      </div>
+    </main>
   );
 }
