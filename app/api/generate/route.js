@@ -1,10 +1,8 @@
 // app/api/generate/route.js
 import { NextResponse } from "next/server";
 
-// Funkcja pomocnicza do opóźnienia - używana w mechanizmie retry
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Funkcja do obsługi zapytań do API z mechanizmem ponownych prób
 async function fetchWithRetry(
   url,
   options,
@@ -15,45 +13,51 @@ async function fetchWithRetry(
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      const response = await fetch(url, options);
+      // Dodajemy timeout do fetch
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 50000); // 50 sekund timeout
 
-      // Sprawdzamy, czy otrzymaliśmy odpowiedź
+      const response = await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timeoutId);
+
+      // Sprawdzamy status model loading
+      if (response.status === 503) {
+        const data = await response.json();
+        if (data.estimated_time) {
+          console.log(`Model loading, estimated time: ${data.estimated_time}`);
+          await delay(Math.min(data.estimated_time * 1000, 45000)); // Maksymalnie 45 sekund czekania
+          continue;
+        }
+      }
+
       if (!response.ok) {
-        let errorText = await response.text();
+        const errorData = await response.text();
         console.log(
-          `Attempt ${attempt + 1} failed with status: ${response.status}`
+          `Attempt ${attempt + 1}/${maxRetries}: Status ${response.status}`
         );
-        console.log("Error response:", errorText);
 
-        // Próbujemy sparsować tekst błędu jako JSON
-        try {
-          const errorJson = JSON.parse(errorText);
-          errorText = errorJson.error || errorText;
-        } catch (e) {
-          // Jeśli nie możemy sparsować JSON, używamy tekstu jako jest
-          console.log("Could not parse error as JSON");
+        if (attempt < maxRetries - 1) {
+          await delay(initialDelay * Math.pow(2, attempt));
+          continue;
         }
-
-        if (response.status === 500 || response.status === 503) {
-          if (attempt < maxRetries - 1) {
-            const waitTime = initialDelay * Math.pow(2, attempt);
-            console.log(`Waiting ${waitTime}ms before next attempt...`);
-            await delay(waitTime);
-            continue;
-          }
-        }
-
-        throw new Error(errorText);
+        throw new Error(errorData);
       }
 
       return response;
     } catch (error) {
-      console.error(`Attempt ${attempt + 1} failed with error:`, error);
       lastError = error;
+      if (error.name === "AbortError") {
+        throw new Error(
+          "Generation timeout - please try again with a simpler prompt"
+        );
+      }
 
       if (attempt < maxRetries - 1) {
-        const waitTime = initialDelay * Math.pow(2, attempt);
-        await delay(waitTime);
+        await delay(initialDelay * Math.pow(2, attempt));
       }
     }
   }
@@ -63,28 +67,24 @@ async function fetchWithRetry(
 
 export async function POST(req) {
   try {
-    // Sprawdzamy klucz API
     if (!process.env.HUGGINGFACE_API_KEY) {
-      console.error("API Key is missing");
-      return NextResponse.json(
-        { error: "Server configuration error" },
-        { status: 500 }
-      );
+      throw new Error("Server configuration error");
     }
 
-    // Pobieramy i walidujemy prompt
     const { prompt } = await req.json();
     if (!prompt) {
       return NextResponse.json(
-        { error: "Prompt is required" },
+        { error: "Please provide a prompt" },
         { status: 400 }
       );
     }
 
-    console.log("Starting image generation with prompt:", prompt);
+    // Dodajemy timeout dla całej operacji
+    const timeoutPromise = new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("Generation timeout")), 55000)
+    );
 
-    // Wywołujemy API z obsługą retry
-    const response = await fetchWithRetry(
+    const generationPromise = fetchWithRetry(
       "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
       {
         method: "POST",
@@ -96,19 +96,12 @@ export async function POST(req) {
       }
     );
 
-    // Sprawdzamy typ zawartości odpowiedzi
-    const contentType = response.headers.get("content-type");
-    if (!contentType || !contentType.includes("image")) {
-      console.error("Unexpected content type:", contentType);
-      return NextResponse.json(
-        { error: "Invalid response from image generation service" },
-        { status: 500 }
-      );
-    }
+    // Używamy Promise.race aby obsłużyć timeout
+    const response = await Promise.race([generationPromise, timeoutPromise]);
 
     const imageData = await response.blob();
     if (!imageData || imageData.size === 0) {
-      throw new Error("Empty image response received");
+      throw new Error("Empty response from API");
     }
 
     return new NextResponse(imageData, {
@@ -119,8 +112,11 @@ export async function POST(req) {
   } catch (error) {
     console.error("Error in API route:", error);
     return NextResponse.json(
-      { error: error.message || "An unexpected error occurred" },
-      { status: 500 }
+      {
+        error: error.message || "Generation failed",
+        details: error.name === "AbortError" ? "Timeout" : error.message,
+      },
+      { status: error.name === "AbortError" ? 504 : 500 }
     );
   }
 }
