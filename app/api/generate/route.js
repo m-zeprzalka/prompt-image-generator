@@ -1,10 +1,10 @@
 // app/api/generate/route.js
 import { NextResponse } from "next/server";
 
-// Funkcja pomocnicza do opóźnienia
+// Funkcja pomocnicza do opóźnienia - używana w mechanizmie retry
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// Funkcja do wykonania żądania z ponownymi próbami
+// Funkcja do obsługi zapytań do API z mechanizmem ponownych prób
 async function fetchWithRetry(
   url,
   options,
@@ -17,32 +17,43 @@ async function fetchWithRetry(
     try {
       const response = await fetch(url, options);
 
-      // Jeśli otrzymamy 500 lub 503, próbujemy ponownie
-      if (response.status === 500 || response.status === 503) {
-        const errorData = await response.text();
+      // Sprawdzamy, czy otrzymaliśmy odpowiedź
+      if (!response.ok) {
+        let errorText = await response.text();
         console.log(
-          `Próba ${attempt + 1}/${maxRetries}: Status ${
-            response.status
-          }. Oczekiwanie...`
+          `Attempt ${attempt + 1} failed with status: ${response.status}`
         );
+        console.log("Error response:", errorText);
 
-        if (attempt < maxRetries - 1) {
-          await delay(initialDelay * Math.pow(2, attempt)); // Exponential backoff
-          continue;
+        // Próbujemy sparsować tekst błędu jako JSON
+        try {
+          const errorJson = JSON.parse(errorText);
+          errorText = errorJson.error || errorText;
+        } catch (e) {
+          // Jeśli nie możemy sparsować JSON, używamy tekstu jako jest
+          console.log("Could not parse error as JSON");
         }
-        throw new Error(errorData);
+
+        if (response.status === 500 || response.status === 503) {
+          if (attempt < maxRetries - 1) {
+            const waitTime = initialDelay * Math.pow(2, attempt);
+            console.log(`Waiting ${waitTime}ms before next attempt...`);
+            await delay(waitTime);
+            continue;
+          }
+        }
+
+        throw new Error(errorText);
       }
 
       return response;
     } catch (error) {
-      console.error(
-        `Próba ${attempt + 1}/${maxRetries} nie powiodła się:`,
-        error
-      );
+      console.error(`Attempt ${attempt + 1} failed with error:`, error);
       lastError = error;
 
       if (attempt < maxRetries - 1) {
-        await delay(initialDelay * Math.pow(2, attempt));
+        const waitTime = initialDelay * Math.pow(2, attempt);
+        await delay(waitTime);
       }
     }
   }
@@ -52,22 +63,27 @@ async function fetchWithRetry(
 
 export async function POST(req) {
   try {
+    // Sprawdzamy klucz API
     if (!process.env.HUGGINGFACE_API_KEY) {
-      throw new Error("Empty API Key");
+      console.error("API Key is missing");
+      return NextResponse.json(
+        { error: "Server configuration error" },
+        { status: 500 }
+      );
     }
 
+    // Pobieramy i walidujemy prompt
     const { prompt } = await req.json();
-
     if (!prompt) {
       return NextResponse.json(
-        { message: "Please provide a prompt" },
+        { error: "Prompt is required" },
         { status: 400 }
       );
     }
 
-    console.log("Sending prompt to Hugging Face...");
+    console.log("Starting image generation with prompt:", prompt);
 
-    // Używamy funkcji fetchWithRetry zamiast zwykłego fetch
+    // Wywołujemy API z obsługą retry
     const response = await fetchWithRetry(
       "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
       {
@@ -80,33 +96,19 @@ export async function POST(req) {
       }
     );
 
-    if (!response.ok) {
-      const errorData = await response.text();
-      console.error("Hugging Face API error:", errorData);
-
-      // Szczegółowa informacja o błędzie
-      let errorMessage = "Error connecting to Hugging Face API";
-      try {
-        const parsedError = JSON.parse(errorData);
-        errorMessage = parsedError.error || errorMessage;
-      } catch (e) {
-        // Jeśli nie możemy sparsować JSON, używamy oryginalnego tekstu
-        errorMessage = errorData;
-      }
-
+    // Sprawdzamy typ zawartości odpowiedzi
+    const contentType = response.headers.get("content-type");
+    if (!contentType || !contentType.includes("image")) {
+      console.error("Unexpected content type:", contentType);
       return NextResponse.json(
-        {
-          message: "API Error",
-          details: errorMessage,
-          status: response.status,
-        },
-        { status: response.status }
+        { error: "Invalid response from image generation service" },
+        { status: 500 }
       );
     }
 
     const imageData = await response.blob();
     if (!imageData || imageData.size === 0) {
-      throw new Error("Empty image response from API");
+      throw new Error("Empty image response received");
     }
 
     return new NextResponse(imageData, {
@@ -115,12 +117,9 @@ export async function POST(req) {
       },
     });
   } catch (error) {
-    console.error("Unexpected error:", error);
+    console.error("Error in API route:", error);
     return NextResponse.json(
-      {
-        message: "Generation failed",
-        details: error.message,
-      },
+      { error: error.message || "An unexpected error occurred" },
       { status: 500 }
     );
   }
