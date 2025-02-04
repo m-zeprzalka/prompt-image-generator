@@ -1,8 +1,10 @@
 // app/api/generate/route.js
 import { NextResponse } from "next/server";
 
+// Funkcja pomocnicza do opóźnienia
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Funkcja do wykonania żądania z ponownymi próbami
 async function fetchWithRetry(
   url,
   options,
@@ -15,7 +17,7 @@ async function fetchWithRetry(
     try {
       // Dodajemy timeout do fetch
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 50000); // 50 sekund timeout
+      const timeoutId = setTimeout(() => controller.abort(), 45000); // 45 sekund timeout dla pojedynczej próby
 
       const response = await fetch(url, {
         ...options,
@@ -29,7 +31,7 @@ async function fetchWithRetry(
         const data = await response.json();
         if (data.estimated_time) {
           console.log(`Model loading, estimated time: ${data.estimated_time}`);
-          await delay(Math.min(data.estimated_time * 1000, 45000)); // Maksymalnie 45 sekund czekania
+          await delay(Math.min(data.estimated_time * 1000, 40000)); // Maksymalnie 40 sekund czekania
           continue;
         }
       }
@@ -51,9 +53,12 @@ async function fetchWithRetry(
     } catch (error) {
       lastError = error;
       if (error.name === "AbortError") {
-        throw new Error(
-          "Generation timeout - please try again with a simpler prompt"
-        );
+        console.log("Request timeout, will retry");
+        // Zamiast rzucać błąd, pozwalamy na kolejną próbę
+        if (attempt < maxRetries - 1) {
+          await delay(initialDelay * Math.pow(2, attempt));
+          continue;
+        }
       }
 
       if (attempt < maxRetries - 1) {
@@ -62,7 +67,8 @@ async function fetchWithRetry(
     }
   }
 
-  throw lastError;
+  // Jeśli wszystkie próby nie powiodły się, zwracamy specjalny status
+  throw new Error("Model still initializing");
 }
 
 export async function POST(req) {
@@ -79,38 +85,55 @@ export async function POST(req) {
       );
     }
 
-    // Dodajemy timeout dla całej operacji
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error("Generation timeout")), 55000)
-    );
+    console.log("Starting generation attempt with prompt:", prompt);
 
-    const generationPromise = fetchWithRetry(
-      "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ inputs: prompt }),
+    try {
+      const response = await fetchWithRetry(
+        "https://api-inference.huggingface.co/models/black-forest-labs/FLUX.1-dev",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.HUGGINGFACE_API_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ inputs: prompt }),
+        }
+      );
+
+      const contentType = response.headers.get("content-type");
+      if (!contentType || !contentType.includes("image")) {
+        console.error("Unexpected content type:", contentType);
+        return NextResponse.json(
+          { error: "Invalid response from model" },
+          { status: 500 }
+        );
       }
-    );
 
-    // Używamy Promise.race aby obsłużyć timeout
-    const response = await Promise.race([generationPromise, timeoutPromise]);
+      const imageData = await response.blob();
+      if (!imageData || imageData.size === 0) {
+        throw new Error("Empty response from API");
+      }
 
-    const imageData = await response.blob();
-    if (!imageData || imageData.size === 0) {
-      throw new Error("Empty response from API");
+      return new NextResponse(imageData, {
+        headers: {
+          "Content-Type": "image/png",
+        },
+      });
+    } catch (error) {
+      // Jeśli błąd wskazuje na inicjalizację modelu, zwracamy 503
+      if (
+        error.message.includes("initializing") ||
+        error.message.includes("loading")
+      ) {
+        return NextResponse.json(
+          { error: "Model loading, retry needed" },
+          { status: 503 }
+        );
+      }
+      throw error;
     }
-
-    return new NextResponse(imageData, {
-      headers: {
-        "Content-Type": "image/png",
-      },
-    });
   } catch (error) {
-    console.error("Error in API route:", error);
+    console.error("API Error:", error);
     return NextResponse.json(
       {
         error: error.message || "Generation failed",
