@@ -20,11 +20,10 @@ export default function Home() {
       timer = setInterval(() => {
         setGenerationTime((prev) => {
           const newTime = prev + 1;
-          // Jeśli przekroczymy limit czasu (250 sekund), przerywamy
-          if (newTime > 250) {
+          if (newTime > 350) {
             setLoading(false);
             setErrorMessage(
-              "Generation timeout - model is taking too long to respond"
+              "Generation timeout - model is taking too long to respond. Please click Generate button again"
             );
             return prev;
           }
@@ -174,9 +173,7 @@ export default function Home() {
         )}
 
         {!loading && totalGenerationTime !== null && (
-          <p className="success-message">
-            Image generated in {totalGenerationTime} seconds!
-          </p>
+          <p className="success-message">Image generated!</p>
         )}
 
         {imageUrl && (
