@@ -10,12 +10,26 @@ export default function Home() {
   const [errorMessage, setErrorMessage] = useState("");
   const [generationTime, setGenerationTime] = useState(0);
   const [totalGenerationTime, setTotalGenerationTime] = useState(null);
+  const [retryCount, setRetryCount] = useState(0);
+  const MAX_RETRIES = 7; // Maksymalna liczba prób (350 sekund)
+  const RETRY_INTERVAL = 50000; // 50 sekund między próbami
 
   useEffect(() => {
     let timer;
     if (loading) {
       timer = setInterval(() => {
-        setGenerationTime((prev) => prev + 1);
+        setGenerationTime((prev) => {
+          const newTime = prev + 1;
+          // Jeśli przekroczymy limit czasu (250 sekund), przerywamy
+          if (newTime > 250) {
+            setLoading(false);
+            setErrorMessage(
+              "Generation timeout - model is taking too long to respond"
+            );
+            return prev;
+          }
+          return newTime;
+        });
       }, 1000);
     }
     return () => {
@@ -24,6 +38,12 @@ export default function Home() {
   }, [loading]);
 
   const startGeneration = async () => {
+    if (retryCount >= MAX_RETRIES) {
+      setLoading(false);
+      setErrorMessage("Maximum retry attempts reached. Please try again.");
+      return;
+    }
+
     try {
       const response = await fetch("/api/generate", {
         method: "POST",
@@ -31,22 +51,38 @@ export default function Home() {
         body: JSON.stringify({ prompt }),
       });
 
+      // Sprawdzamy typ odpowiedzi
       const contentType = response.headers.get("content-type");
 
+      // Jeśli otrzymamy błąd 504, próbujemy ponownie
+      if (response.status === 504) {
+        console.log(
+          `Attempt ${
+            retryCount + 1
+          }/${MAX_RETRIES}: Server timeout, retrying...`
+        );
+        setRetryCount((prev) => prev + 1);
+        setTimeout(startGeneration, RETRY_INTERVAL);
+        return;
+      }
+
+      // Jeśli otrzymamy JSON, sprawdzamy czy to błąd
       if (contentType?.includes("application/json")) {
         const errorData = await response.json();
-        // Jeśli model się ładuje, spróbujemy ponownie za 50 sekund
         if (response.status === 503) {
-          setTimeout(startGeneration, 50000);
+          setRetryCount((prev) => prev + 1);
+          setTimeout(startGeneration, RETRY_INTERVAL);
           return;
         }
         throw new Error(errorData.error || "Failed to generate image");
       }
 
+      // Jeśli odpowiedź nie jest OK i nie jest to JSON
       if (!response.ok) {
         throw new Error("Failed to generate image");
       }
 
+      // Jeśli wszystko OK, przetwarzamy obraz
       const blob = await response.blob();
       if (blob.size > 0) {
         setImageBlob(blob);
@@ -54,13 +90,17 @@ export default function Home() {
         setTotalGenerationTime(generationTime);
         setLoading(false);
       } else {
-        // Jeśli otrzymaliśmy pusty blob, spróbujemy ponownie
-        setTimeout(startGeneration, 50000);
+        // Pusty blob, próbujemy ponownie
+        setRetryCount((prev) => prev + 1);
+        setTimeout(startGeneration, RETRY_INTERVAL);
       }
     } catch (error) {
-      if (loading) {
-        // Jeśli wciąż jesteśmy w trybie ładowania, spróbujemy ponownie
-        setTimeout(startGeneration, 50000);
+      if (loading && retryCount < MAX_RETRIES) {
+        setRetryCount((prev) => prev + 1);
+        setTimeout(startGeneration, RETRY_INTERVAL);
+      } else {
+        setLoading(false);
+        setErrorMessage(error.message || "An unexpected error occurred");
       }
     }
   };
@@ -77,6 +117,7 @@ export default function Home() {
     setImageBlob(null);
     setTotalGenerationTime(null);
     setGenerationTime(0);
+    setRetryCount(0);
 
     startGeneration();
   };
